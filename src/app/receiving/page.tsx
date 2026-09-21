@@ -21,6 +21,9 @@ export default async function ReceivingPage({ searchParams }: { searchParams: Pr
   const allStaff = await db.staff.findMany({ orderBy: { id: 'asc' } });
   const staffNameById = new Map(allStaff.map((s) => [s.id, s.name]));
   const allSuppliers = await db.supplier.findMany({ orderBy: { name: 'asc' } });
+  const supplierById = new Map(allSuppliers.map((s) => [s.id, s]));
+  const allItems = await db.item.findMany();
+  const itemById = new Map(allItems.map((i) => [i.id, i]));
 
   const orders = await db.purchaseOrder.findMany({ where: { targetYearMonth } });
   const orderIds = orders.map((o) => o.id);
@@ -34,7 +37,7 @@ export default async function ReceivingPage({ searchParams }: { searchParams: Pr
 
   const rows = orders
     .map((order) => {
-      const item = db.item.findUnique({ where: { id: order.itemId } });
+      const item = itemById.get(order.itemId);
       if (!item) return null;
       const receipts = receiptsByOrder.get(order.id) ?? [];
       const totalReceived = receipts.reduce((sum, r) => sum + r.receivedQty, 0);
@@ -48,7 +51,7 @@ export default async function ReceivingPage({ searchParams }: { searchParams: Pr
               ? 'partial'
               : 'complete';
 
-      const supplier = item.supplierId ? db.supplier.findUnique({ where: { id: item.supplierId } }) : null;
+      const supplier = item.supplierId ? (supplierById.get(item.supplierId) ?? null) : null;
       const lastReceivedDate = receipts.length > 0 ? receipts[receipts.length - 1].receivedDate : null;
 
       return {

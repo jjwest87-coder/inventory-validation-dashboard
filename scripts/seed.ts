@@ -43,7 +43,7 @@ async function main() {
   console.log('Seeding staff...');
   for (const person of ROSTER) {
     const passwordHash = await bcrypt.hash('1111', 10);
-    db.staff.upsert({
+    await db.staff.upsert({
       where: { id: person.id },
       update: { name: person.name, role: person.role },
       create: { id: person.id, name: person.name, role: person.role, passwordHash },
@@ -61,7 +61,7 @@ async function main() {
     const assigneeId = assigneeName ? nameToId.get(String(assigneeName).trim()) ?? null : null;
     if (assigneeName && !assigneeId) unmatchedAssignees.add(String(assigneeName));
 
-    db.item.upsert({
+    await db.item.upsert({
       where: { code: String(code) },
       update: {
         name: String(name ?? ''),
@@ -95,13 +95,13 @@ async function main() {
     const code = row[4] as string;
     if (!code) continue;
 
-    let item = db.item.findUnique({ where: { code: String(code) } });
+    let item = await db.item.findUnique({ where: { code: String(code) } });
     if (!item) {
       const name = (row[5] as string) ?? '';
       const spec = (row[6] as string) ?? null;
       const type = (row[3] as string) ?? null;
       const manufacturer = (row[8] as string) ?? null;
-      item = db.item.create({
+      item = await db.item.create({
         data: { code: String(code), name: String(name), spec, type, manufacturer },
       });
       missingItemCodes.add(String(code));
@@ -113,7 +113,7 @@ async function main() {
       const outboundQty = Number(value);
       if (!Number.isFinite(outboundQty)) continue;
 
-      db.usageHistory.upsert({
+      await db.usageHistory.upsert({
         where: { itemId_yearMonth: { itemId: item.id, yearMonth: ym } },
         update: { outboundQty, source: 'imported' },
         create: { itemId: item.id, yearMonth: ym, outboundQty, source: 'imported' },

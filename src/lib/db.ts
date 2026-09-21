@@ -1,6 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
-import path from 'path';
-import fs from 'fs';
+import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 
 export type Role = 'MASTER' | 'STAFF';
 
@@ -115,224 +113,154 @@ export interface MonthlyRecordRow {
   updatedAt: Date;
 }
 
-const DB_PATH = process.env.SQLITE_PATH ?? path.join(process.cwd(), 'db', 'dev.db');
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+// Lazily created so importing this module never crashes a build step that runs before
+// DATABASE_URL is available (e.g. static analysis) — only the first real query needs it.
+let sqlClient: NeonQueryFunction<false, false> | null = null;
+function getSql() {
+  if (!sqlClient) {
+    const url = process.env.DATABASE_URL;
+    if (!url) throw new Error('DATABASE_URL is not set');
+    sqlClient = neon(url);
+  }
+  return sqlClient;
+}
 
-const globalForDb = globalThis as unknown as { sqliteDb?: DatabaseSync };
-const raw = globalForDb.sqliteDb ?? new DatabaseSync(DB_PATH);
-if (process.env.NODE_ENV !== 'production') globalForDb.sqliteDb = raw;
+async function q<T = Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
+  await ready;
+  const sql = getSql();
+  return (await sql.query(text, params)) as unknown as T[];
+}
 
-raw.exec(`
-  PRAGMA journal_mode = WAL;
+async function q1<T = Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T | undefined> {
+  const rows = await q<T>(text, params);
+  return rows[0];
+}
 
-  CREATE TABLE IF NOT EXISTS Staff (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    passwordHash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'STAFF',
-    active INTEGER NOT NULL DEFAULT 1,
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS Item (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    spec TEXT,
-    type TEXT,
-    manufacturer TEXT,
-    assigneeId TEXT REFERENCES Staff(id),
-    active INTEGER NOT NULL DEFAULT 1,
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS Supplier (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS UsageHistory (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    itemId INTEGER NOT NULL REFERENCES Item(id),
-    yearMonth TEXT NOT NULL,
-    outboundQty REAL NOT NULL,
-    source TEXT NOT NULL DEFAULT 'imported',
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    UNIQUE(itemId, yearMonth)
-  );
-
-  CREATE TABLE IF NOT EXISTS MonthlyRecord (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    itemId INTEGER NOT NULL REFERENCES Item(id),
-    yearMonth TEXT NOT NULL,
-    staffId TEXT NOT NULL REFERENCES Staff(id),
-    incomingQty REAL NOT NULL DEFAULT 0,
-    actualCount REAL,
-    previousStock REAL,
-    expectedCount REAL,
-    variance REAL,
-    avgUsageUsed REAL,
-    flagged INTEGER NOT NULL DEFAULT 0,
-    isBaseline INTEGER NOT NULL DEFAULT 0,
-    submittedAt TEXT,
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    updatedAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    UNIQUE(itemId, yearMonth)
-  );
-
-  CREATE TABLE IF NOT EXISTS PurchaseOrder (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    itemId INTEGER NOT NULL REFERENCES Item(id),
-    targetYearMonth TEXT NOT NULL,
-    orderedQty REAL NOT NULL,
-    orderedAt TEXT NOT NULL,
-    orderedBy TEXT NOT NULL REFERENCES Staff(id),
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    UNIQUE(itemId, targetYearMonth)
-  );
-
-  CREATE TABLE IF NOT EXISTS Receipt (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    purchaseOrderId INTEGER NOT NULL REFERENCES PurchaseOrder(id),
-    receivedQty REAL NOT NULL,
-    receivedDate TEXT NOT NULL,
-    hasPackingSlip INTEGER NOT NULL DEFAULT 0,
-    recordedBy TEXT NOT NULL REFERENCES Staff(id),
-    note TEXT,
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS ChangeLog (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    entityType TEXT NOT NULL,
-    entityKey TEXT NOT NULL,
-    field TEXT NOT NULL,
-    oldValue REAL,
-    newValue REAL NOT NULL,
-    changedBy TEXT NOT NULL REFERENCES Staff(id),
-    changedAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS Lot (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    itemId INTEGER NOT NULL REFERENCES Item(id),
-    yearMonth TEXT NOT NULL,
-    lotNumber TEXT NOT NULL,
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    UNIQUE(itemId, yearMonth, lotNumber)
-  );
-
-  CREATE TABLE IF NOT EXISTS LotCount (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    lotId INTEGER NOT NULL REFERENCES Lot(id),
-    yearMonth TEXT NOT NULL,
-    count REAL NOT NULL,
-    recordedBy TEXT NOT NULL REFERENCES Staff(id),
-    submittedAt TEXT NOT NULL,
-    UNIQUE(lotId, yearMonth)
-  );
-
-  CREATE TABLE IF NOT EXISTS AuditLog (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    actorId TEXT NOT NULL,
-    action TEXT NOT NULL,
-    detail TEXT NOT NULL,
-    createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );
-`);
-
-// Item existed before Supplier was introduced — add the column if this DB predates it.
-{
-  const itemColumns = raw.prepare('PRAGMA table_info(Item)').all() as Record<string, unknown>[];
-  const hasSupplierId = itemColumns.some((c) => c.name === 'supplierId');
-  if (!hasSupplierId) {
-    raw.exec('ALTER TABLE Item ADD COLUMN supplierId INTEGER REFERENCES Supplier(id)');
+async function ensureSchema(): Promise<void> {
+  const sql = getSql();
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS "Staff" (
+      "id" TEXT PRIMARY KEY,
+      "name" TEXT NOT NULL,
+      "passwordHash" TEXT NOT NULL,
+      "role" TEXT NOT NULL DEFAULT 'STAFF',
+      "active" INTEGER NOT NULL DEFAULT 1,
+      "createdAt" TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS "Supplier" (
+      "id" SERIAL PRIMARY KEY,
+      "name" TEXT NOT NULL UNIQUE,
+      "color" TEXT,
+      "contactName" TEXT,
+      "contactPhone" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS "Item" (
+      "id" SERIAL PRIMARY KEY,
+      "code" TEXT NOT NULL UNIQUE,
+      "name" TEXT NOT NULL,
+      "spec" TEXT,
+      "type" TEXT,
+      "manufacturer" TEXT,
+      "assigneeId" TEXT REFERENCES "Staff"("id"),
+      "supplierId" INTEGER REFERENCES "Supplier"("id"),
+      "orderMultiple" INTEGER,
+      "note" TEXT,
+      "active" INTEGER NOT NULL DEFAULT 1,
+      "createdAt" TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS "UsageHistory" (
+      "id" SERIAL PRIMARY KEY,
+      "itemId" INTEGER NOT NULL REFERENCES "Item"("id"),
+      "yearMonth" TEXT NOT NULL,
+      "outboundQty" DOUBLE PRECISION NOT NULL,
+      "source" TEXT NOT NULL DEFAULT 'imported',
+      "createdAt" TEXT NOT NULL,
+      UNIQUE("itemId", "yearMonth")
+    )`,
+    `CREATE TABLE IF NOT EXISTS "MonthlyRecord" (
+      "id" SERIAL PRIMARY KEY,
+      "itemId" INTEGER NOT NULL REFERENCES "Item"("id"),
+      "yearMonth" TEXT NOT NULL,
+      "staffId" TEXT NOT NULL REFERENCES "Staff"("id"),
+      "incomingQty" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      "actualCount" DOUBLE PRECISION,
+      "previousStock" DOUBLE PRECISION,
+      "expectedCount" DOUBLE PRECISION,
+      "variance" DOUBLE PRECISION,
+      "avgUsageUsed" DOUBLE PRECISION,
+      "flagged" INTEGER NOT NULL DEFAULT 0,
+      "isBaseline" INTEGER NOT NULL DEFAULT 0,
+      "submittedAt" TEXT,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL,
+      UNIQUE("itemId", "yearMonth")
+    )`,
+    `CREATE TABLE IF NOT EXISTS "PurchaseOrder" (
+      "id" SERIAL PRIMARY KEY,
+      "itemId" INTEGER NOT NULL REFERENCES "Item"("id"),
+      "targetYearMonth" TEXT NOT NULL,
+      "orderedQty" DOUBLE PRECISION NOT NULL,
+      "orderedAt" TEXT NOT NULL,
+      "orderedBy" TEXT NOT NULL REFERENCES "Staff"("id"),
+      "createdAt" TEXT NOT NULL,
+      UNIQUE("itemId", "targetYearMonth")
+    )`,
+    `CREATE TABLE IF NOT EXISTS "Receipt" (
+      "id" SERIAL PRIMARY KEY,
+      "purchaseOrderId" INTEGER NOT NULL REFERENCES "PurchaseOrder"("id"),
+      "receivedQty" DOUBLE PRECISION NOT NULL,
+      "receivedDate" TEXT NOT NULL,
+      "hasPackingSlip" INTEGER NOT NULL DEFAULT 0,
+      "recordedBy" TEXT NOT NULL REFERENCES "Staff"("id"),
+      "note" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS "ChangeLog" (
+      "id" SERIAL PRIMARY KEY,
+      "entityType" TEXT NOT NULL,
+      "entityKey" TEXT NOT NULL,
+      "field" TEXT NOT NULL,
+      "oldValue" DOUBLE PRECISION,
+      "newValue" DOUBLE PRECISION NOT NULL,
+      "changedBy" TEXT NOT NULL REFERENCES "Staff"("id"),
+      "changedAt" TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS "Lot" (
+      "id" SERIAL PRIMARY KEY,
+      "itemId" INTEGER NOT NULL REFERENCES "Item"("id"),
+      "yearMonth" TEXT NOT NULL,
+      "lotNumber" TEXT NOT NULL,
+      "createdAt" TEXT NOT NULL,
+      UNIQUE("itemId", "yearMonth", "lotNumber")
+    )`,
+    `CREATE TABLE IF NOT EXISTS "LotCount" (
+      "id" SERIAL PRIMARY KEY,
+      "lotId" INTEGER NOT NULL REFERENCES "Lot"("id"),
+      "yearMonth" TEXT NOT NULL,
+      "count" DOUBLE PRECISION NOT NULL,
+      "recordedBy" TEXT NOT NULL REFERENCES "Staff"("id"),
+      "submittedAt" TEXT NOT NULL,
+      UNIQUE("lotId", "yearMonth")
+    )`,
+    `CREATE TABLE IF NOT EXISTS "AuditLog" (
+      "id" SERIAL PRIMARY KEY,
+      "actorId" TEXT NOT NULL,
+      "action" TEXT NOT NULL,
+      "detail" TEXT NOT NULL,
+      "createdAt" TEXT NOT NULL
+    )`,
+  ];
+  for (const stmt of statements) {
+    await sql.query(stmt);
   }
 }
 
-// Supplier existed before color/contact fields were introduced — add them if this DB predates it.
-{
-  const supplierColumns = raw.prepare('PRAGMA table_info(Supplier)').all() as Record<string, unknown>[];
-  const existingNames = new Set(supplierColumns.map((c) => c.name as string));
-  if (!existingNames.has('color')) raw.exec('ALTER TABLE Supplier ADD COLUMN color TEXT');
-  if (!existingNames.has('contactName')) raw.exec('ALTER TABLE Supplier ADD COLUMN contactName TEXT');
-  if (!existingNames.has('contactPhone')) raw.exec('ALTER TABLE Supplier ADD COLUMN contactPhone TEXT');
-}
-
-// Item existed before orderMultiple was introduced — add it if this DB predates it.
-{
-  const itemColumns2 = raw.prepare('PRAGMA table_info(Item)').all() as Record<string, unknown>[];
-  const hasOrderMultiple = itemColumns2.some((c) => c.name === 'orderMultiple');
-  if (!hasOrderMultiple) raw.exec('ALTER TABLE Item ADD COLUMN orderMultiple INTEGER');
-}
-
-// Item existed before note was introduced — add it if this DB predates it.
-{
-  const itemColumns3 = raw.prepare('PRAGMA table_info(Item)').all() as Record<string, unknown>[];
-  const hasNote = itemColumns3.some((c) => c.name === 'note');
-  if (!hasNote) raw.exec('ALTER TABLE Item ADD COLUMN note TEXT');
-}
-
-// Lot originally had a global "active" flag instead of being scoped per month — migrate any
-// still-active lots forward into the current month so nothing already pasted in is lost.
-{
-  const lotColumns = raw.prepare('PRAGMA table_info(Lot)').all() as Record<string, unknown>[];
-  const hasYearMonth = lotColumns.some((c) => c.name === 'yearMonth');
-  if (!hasYearMonth) {
-    raw.exec('ALTER TABLE Lot RENAME TO Lot_old_pre_month_scope');
-    raw.exec(`
-      CREATE TABLE Lot (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        itemId INTEGER NOT NULL REFERENCES Item(id),
-        yearMonth TEXT NOT NULL,
-        lotNumber TEXT NOT NULL,
-        createdAt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-        UNIQUE(itemId, yearMonth, lotNumber)
-      );
-    `);
-    const now = new Date();
-    const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const oldLots = raw.prepare('SELECT * FROM Lot_old_pre_month_scope WHERE active = 1').all() as Record<
-      string,
-      unknown
-    >[];
-    for (const l of oldLots) {
-      raw
-        .prepare('INSERT OR IGNORE INTO Lot (id, itemId, yearMonth, lotNumber, createdAt) VALUES (?, ?, ?, ?, ?)')
-        .run(l.id, l.itemId, currentYm, l.lotNumber, l.createdAt);
-    }
-    raw.exec('DROP TABLE Lot_old_pre_month_scope');
-  }
-}
-
-// SQLite auto-rewrites foreign key text in other tables when their parent is renamed, so the
-// "ALTER TABLE Lot RENAME TO Lot_old_pre_month_scope" step above silently repointed LotCount's
-// FK at that transient name — which was then dropped, leaving LotCount referencing a table that
-// no longer exists. Rebuild LotCount pointing at the real "Lot" table if this happened.
-{
-  const lotCountSql = raw
-    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='LotCount'")
-    .get() as { sql: string } | undefined;
-  if (lotCountSql && lotCountSql.sql.includes('Lot_old_pre_month_scope')) {
-    raw.exec('ALTER TABLE LotCount RENAME TO LotCount_fk_fix_old');
-    raw.exec(`
-      CREATE TABLE LotCount (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        lotId INTEGER NOT NULL REFERENCES Lot(id),
-        yearMonth TEXT NOT NULL,
-        count REAL NOT NULL,
-        recordedBy TEXT NOT NULL REFERENCES Staff(id),
-        submittedAt TEXT NOT NULL,
-        UNIQUE(lotId, yearMonth)
-      );
-    `);
-    raw.exec(
-      'INSERT INTO LotCount (id, lotId, yearMonth, count, recordedBy, submittedAt) SELECT id, lotId, yearMonth, count, recordedBy, submittedAt FROM LotCount_fk_fix_old',
-    );
-    raw.exec('DROP TABLE LotCount_fk_fix_old');
-  }
-}
+let readyPromise: Promise<void> | null = null;
+const ready = new Promise<void>((resolve, reject) => {
+  readyPromise = ensureSchema().then(resolve, reject);
+});
+void readyPromise;
 
 function nowIso() {
   return new Date().toISOString();
@@ -473,24 +401,23 @@ function toRecord(row: Record<string, unknown> | undefined): MonthlyRecordRow | 
 
 export const db = {
   staff: {
-    findUnique({ where }: { where: { id: string } }): StaffRow | null {
-      const row = raw.prepare('SELECT * FROM Staff WHERE id = ?').get(where.id) as
-        | Record<string, unknown>
-        | undefined;
+    async findUnique({ where }: { where: { id: string } }): Promise<StaffRow | null> {
+      const row = await q1('SELECT * FROM "Staff" WHERE "id" = $1', [where.id]);
       return toStaff(row);
     },
-    findMany(args: { orderBy?: { id: 'asc' | 'desc' } } = {}): StaffRow[] {
+    async findMany(args: { orderBy?: { id: 'asc' | 'desc' } } = {}): Promise<StaffRow[]> {
       const dir = args.orderBy?.id === 'desc' ? 'DESC' : 'ASC';
-      const rows = raw.prepare(`SELECT * FROM Staff ORDER BY id ${dir}`).all() as Record<string, unknown>[];
+      const rows = await q(`SELECT * FROM "Staff" ORDER BY "id" ${dir}`);
       return rows.map((r) => toStaff(r)!);
     },
-    create({ data }: { data: { id: string; name: string; role: Role; passwordHash: string } }): StaffRow {
-      raw
-        .prepare('INSERT INTO Staff (id, name, role, passwordHash, active, createdAt) VALUES (?, ?, ?, ?, 1, ?)')
-        .run(data.id, data.name, data.role, data.passwordHash, nowIso());
-      return this.findUnique({ where: { id: data.id } })!;
+    async create({ data }: { data: { id: string; name: string; role: Role; passwordHash: string } }): Promise<StaffRow> {
+      await q(
+        'INSERT INTO "Staff" ("id", "name", "role", "passwordHash", "active", "createdAt") VALUES ($1, $2, $3, $4, 1, $5)',
+        [data.id, data.name, data.role, data.passwordHash, nowIso()],
+      );
+      return (await this.findUnique({ where: { id: data.id } }))!;
     },
-    upsert({
+    async upsert({
       where,
       update,
       create,
@@ -498,64 +425,57 @@ export const db = {
       where: { id: string };
       update: { name: string; role: Role };
       create: { id: string; name: string; role: Role; passwordHash: string };
-    }): StaffRow {
-      const existing = this.findUnique({ where });
+    }): Promise<StaffRow> {
+      const existing = await this.findUnique({ where });
       if (existing) {
-        raw.prepare('UPDATE Staff SET name = ?, role = ? WHERE id = ?').run(update.name, update.role, where.id);
-        return this.findUnique({ where })!;
+        await q('UPDATE "Staff" SET "name" = $1, "role" = $2 WHERE "id" = $3', [update.name, update.role, where.id]);
+        return (await this.findUnique({ where }))!;
       }
       return this.create({ data: create });
     },
   },
 
   item: {
-    findUnique({ where }: { where: { id?: number; code?: string } }): ItemRow | null {
+    async findUnique({ where }: { where: { id?: number; code?: string } }): Promise<ItemRow | null> {
       if (where.id != null) {
-        const row = raw.prepare('SELECT * FROM Item WHERE id = ?').get(where.id) as
-          | Record<string, unknown>
-          | undefined;
+        const row = await q1('SELECT * FROM "Item" WHERE "id" = $1', [where.id]);
         return toItem(row);
       }
-      const row = raw.prepare('SELECT * FROM Item WHERE code = ?').get(where.code!) as
-        | Record<string, unknown>
-        | undefined;
+      const row = await q1('SELECT * FROM "Item" WHERE "code" = $1', [where.code!]);
       return toItem(row);
     },
-    findMany(args: {
+    async findMany(args: {
       where?: { assigneeId?: string; active?: boolean };
       orderBy?: { code: 'asc' | 'desc' };
       include?: { assignee?: boolean; supplier?: boolean };
-    } = {}): ItemRow[] {
+    } = {}): Promise<ItemRow[]> {
       const clauses: string[] = [];
       const params: unknown[] = [];
       if (args.where?.assigneeId !== undefined) {
-        clauses.push('assigneeId = ?');
         params.push(args.where.assigneeId);
+        clauses.push(`"assigneeId" = $${params.length}`);
       }
       if (args.where?.active !== undefined) {
-        clauses.push('active = ?');
         params.push(args.where.active ? 1 : 0);
+        clauses.push(`"active" = $${params.length}`);
       }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const dir = args.orderBy?.code === 'desc' ? 'DESC' : 'ASC';
-      const rows = raw.prepare(`SELECT * FROM Item ${where} ORDER BY code ${dir}`).all(...params) as Record<
-        string,
-        unknown
-      >[];
+      const rows = await q(`SELECT * FROM "Item" ${where} ORDER BY "code" ${dir}`, params);
       const items = rows.map((r) => toItem(r)!);
       if (args.include?.assignee) {
         for (const item of items) {
-          item.assignee = item.assigneeId ? db.staff.findUnique({ where: { id: item.assigneeId } }) : null;
+          item.assignee = item.assigneeId ? await db.staff.findUnique({ where: { id: item.assigneeId } }) : null;
         }
       }
       if (args.include?.supplier) {
         for (const item of items) {
-          item.supplier = item.supplierId ? db.supplier.findUnique({ where: { id: item.supplierId } }) : null;
+          item.supplier = item.supplierId ? await db.supplier.findUnique({ where: { id: item.supplierId } }) : null;
         }
       }
       return items;
     },
-    create({
+    async create({
       data,
     }: {
       data: {
@@ -569,13 +489,11 @@ export const db = {
         orderMultiple?: number | null;
         note?: string | null;
       };
-    }): ItemRow {
-      raw
-        .prepare(
-          `INSERT INTO Item (code, name, spec, type, manufacturer, assigneeId, supplierId, orderMultiple, note, active, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-        )
-        .run(
+    }): Promise<ItemRow> {
+      await q(
+        `INSERT INTO "Item" ("code", "name", "spec", "type", "manufacturer", "assigneeId", "supplierId", "orderMultiple", "note", "active", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10)`,
+        [
           data.code,
           data.name,
           data.spec ?? null,
@@ -586,10 +504,11 @@ export const db = {
           data.orderMultiple ?? null,
           data.note ?? null,
           nowIso(),
-        );
-      return this.findUnique({ where: { code: data.code } })!;
+        ],
+      );
+      return (await this.findUnique({ where: { code: data.code } }))!;
     },
-    update({
+    async update({
       where,
       data,
     }: {
@@ -601,38 +520,35 @@ export const db = {
         note?: string | null;
         active?: boolean;
       };
-    }): ItemRow {
+    }): Promise<ItemRow> {
       if (data.assigneeId !== undefined) {
-        raw.prepare('UPDATE Item SET assigneeId = ? WHERE id = ?').run(data.assigneeId, where.id);
+        await q('UPDATE "Item" SET "assigneeId" = $1 WHERE "id" = $2', [data.assigneeId, where.id]);
       }
       if (data.orderMultiple !== undefined) {
-        raw.prepare('UPDATE Item SET orderMultiple = ? WHERE id = ?').run(data.orderMultiple, where.id);
+        await q('UPDATE "Item" SET "orderMultiple" = $1 WHERE "id" = $2', [data.orderMultiple, where.id]);
       }
       if (data.note !== undefined) {
-        raw.prepare('UPDATE Item SET note = ? WHERE id = ?').run(data.note, where.id);
+        await q('UPDATE "Item" SET "note" = $1 WHERE "id" = $2', [data.note, where.id]);
       }
       if (data.supplierId !== undefined) {
-        raw.prepare('UPDATE Item SET supplierId = ? WHERE id = ?').run(data.supplierId, where.id);
+        await q('UPDATE "Item" SET "supplierId" = $1 WHERE "id" = $2', [data.supplierId, where.id]);
       }
       if (data.active !== undefined) {
-        raw.prepare('UPDATE Item SET active = ? WHERE id = ?').run(data.active ? 1 : 0, where.id);
+        await q('UPDATE "Item" SET "active" = $1 WHERE "id" = $2', [data.active ? 1 : 0, where.id]);
       }
-      return this.findUnique({ where: { id: where.id } })!;
+      return (await this.findUnique({ where: { id: where.id } }))!;
     },
-    remove(id: number): { ok: true } | { ok: false; reason: string } {
-      const hasRecords = (raw.prepare('SELECT COUNT(*) c FROM MonthlyRecord WHERE itemId = ?').get(id) as { c: number })
-        .c;
-      const hasOrders = (raw.prepare('SELECT COUNT(*) c FROM PurchaseOrder WHERE itemId = ?').get(id) as { c: number })
-        .c;
-      const hasUsage = (raw.prepare('SELECT COUNT(*) c FROM UsageHistory WHERE itemId = ?').get(id) as { c: number })
-        .c;
-      if (hasRecords > 0 || hasOrders > 0 || hasUsage > 0) {
+    async remove(id: number): Promise<{ ok: true } | { ok: false; reason: string }> {
+      const [{ c: recordCount }] = await q<{ c: number }>('SELECT COUNT(*)::int c FROM "MonthlyRecord" WHERE "itemId" = $1', [id]);
+      const [{ c: orderCount }] = await q<{ c: number }>('SELECT COUNT(*)::int c FROM "PurchaseOrder" WHERE "itemId" = $1', [id]);
+      const [{ c: usageCount }] = await q<{ c: number }>('SELECT COUNT(*)::int c FROM "UsageHistory" WHERE "itemId" = $1', [id]);
+      if (recordCount > 0 || orderCount > 0 || usageCount > 0) {
         return { ok: false, reason: '실사·발주·출고 이력이 있어 완전히 삭제할 수 없습니다. 대신 비활성화해주세요.' };
       }
-      raw.prepare('DELETE FROM Item WHERE id = ?').run(id);
+      await q('DELETE FROM "Item" WHERE "id" = $1', [id]);
       return { ok: true };
     },
-    upsert({
+    async upsert({
       where,
       update,
       create,
@@ -653,187 +569,183 @@ export const db = {
         manufacturer: string | null;
         assigneeId: string | null;
       };
-    }): ItemRow {
-      const existing = this.findUnique({ where: { code: where.code } });
+    }): Promise<ItemRow> {
+      const existing = await this.findUnique({ where: { code: where.code } });
       if (existing) {
-        raw
-          .prepare('UPDATE Item SET name = ?, spec = ?, type = ?, manufacturer = ?, assigneeId = ? WHERE code = ?')
-          .run(update.name, update.spec, update.type, update.manufacturer, update.assigneeId, where.code);
-        return this.findUnique({ where: { code: where.code } })!;
+        await q(
+          'UPDATE "Item" SET "name" = $1, "spec" = $2, "type" = $3, "manufacturer" = $4, "assigneeId" = $5 WHERE "code" = $6',
+          [update.name, update.spec, update.type, update.manufacturer, update.assigneeId, where.code],
+        );
+        return (await this.findUnique({ where: { code: where.code } }))!;
       }
       return this.create({ data: create });
     },
   },
 
   supplier: {
-    findUnique({ where }: { where: { id: number } }): SupplierRow | null {
-      const row = raw.prepare('SELECT * FROM Supplier WHERE id = ?').get(where.id) as
-        | Record<string, unknown>
-        | undefined;
+    async findUnique({ where }: { where: { id: number } }): Promise<SupplierRow | null> {
+      const row = await q1('SELECT * FROM "Supplier" WHERE "id" = $1', [where.id]);
       return row ? toSupplier(row) : null;
     },
-    findMany(args: { orderBy?: { name: 'asc' | 'desc' } } = {}): SupplierRow[] {
+    async findMany(args: { orderBy?: { name: 'asc' | 'desc' } } = {}): Promise<SupplierRow[]> {
       const dir = args.orderBy?.name === 'desc' ? 'DESC' : 'ASC';
-      const rows = raw.prepare(`SELECT * FROM Supplier ORDER BY name ${dir}`).all() as Record<string, unknown>[];
+      const rows = await q(`SELECT * FROM "Supplier" ORDER BY "name" ${dir}`);
       return rows.map(toSupplier);
     },
-    create({
+    async create({
       data,
     }: {
       data: { name: string; color?: string | null; contactName?: string | null; contactPhone?: string | null };
-    }): SupplierRow {
-      raw
-        .prepare('INSERT INTO Supplier (name, color, contactName, contactPhone, createdAt) VALUES (?, ?, ?, ?, ?)')
-        .run(data.name, data.color ?? null, data.contactName ?? null, data.contactPhone ?? null, nowIso());
-      const row = raw.prepare('SELECT * FROM Supplier WHERE id = last_insert_rowid()').get() as Record<
-        string,
-        unknown
-      >;
-      return toSupplier(row);
+    }): Promise<SupplierRow> {
+      const row = await q1(
+        'INSERT INTO "Supplier" ("name", "color", "contactName", "contactPhone", "createdAt") VALUES ($1, $2, $3, $4, $5) RETURNING *',
+        [data.name, data.color ?? null, data.contactName ?? null, data.contactPhone ?? null, nowIso()],
+      );
+      return toSupplier(row!);
     },
-    update({
+    async update({
       where,
       data,
     }: {
       where: { id: number };
       data: { name?: string; color?: string | null; contactName?: string | null; contactPhone?: string | null };
-    }): SupplierRow {
-      if (data.name !== undefined) raw.prepare('UPDATE Supplier SET name = ? WHERE id = ?').run(data.name, where.id);
-      if (data.color !== undefined) raw.prepare('UPDATE Supplier SET color = ? WHERE id = ?').run(data.color, where.id);
+    }): Promise<SupplierRow> {
+      if (data.name !== undefined) await q('UPDATE "Supplier" SET "name" = $1 WHERE "id" = $2', [data.name, where.id]);
+      if (data.color !== undefined)
+        await q('UPDATE "Supplier" SET "color" = $1 WHERE "id" = $2', [data.color, where.id]);
       if (data.contactName !== undefined)
-        raw.prepare('UPDATE Supplier SET contactName = ? WHERE id = ?').run(data.contactName, where.id);
+        await q('UPDATE "Supplier" SET "contactName" = $1 WHERE "id" = $2', [data.contactName, where.id]);
       if (data.contactPhone !== undefined)
-        raw.prepare('UPDATE Supplier SET contactPhone = ? WHERE id = ?').run(data.contactPhone, where.id);
-      return this.findUnique({ where })!;
+        await q('UPDATE "Supplier" SET "contactPhone" = $1 WHERE "id" = $2', [data.contactPhone, where.id]);
+      return (await this.findUnique({ where }))!;
     },
   },
 
   lot: {
-    findUnique({
+    async findUnique({
       where,
     }: {
       where: { itemId_yearMonth_lotNumber: { itemId: number; yearMonth: string; lotNumber: string } };
-    }): LotRow | null {
+    }): Promise<LotRow | null> {
       const { itemId, yearMonth, lotNumber } = where.itemId_yearMonth_lotNumber;
-      const row = raw
-        .prepare('SELECT * FROM Lot WHERE itemId = ? AND yearMonth = ? AND lotNumber = ?')
-        .get(itemId, yearMonth, lotNumber) as Record<string, unknown> | undefined;
+      const row = await q1('SELECT * FROM "Lot" WHERE "itemId" = $1 AND "yearMonth" = $2 AND "lotNumber" = $3', [
+        itemId,
+        yearMonth,
+        lotNumber,
+      ]);
       return row ? toLot(row) : null;
     },
-    findMany({ where }: { where?: { itemId?: number; yearMonth?: string } } = {}): LotRow[] {
+    async findMany({ where }: { where?: { itemId?: number; yearMonth?: string } } = {}): Promise<LotRow[]> {
       const clauses: string[] = [];
       const params: unknown[] = [];
       if (where?.itemId !== undefined) {
-        clauses.push('itemId = ?');
         params.push(where.itemId);
+        clauses.push(`"itemId" = $${params.length}`);
       }
       if (where?.yearMonth !== undefined) {
-        clauses.push('yearMonth = ?');
         params.push(where.yearMonth);
+        clauses.push(`"yearMonth" = $${params.length}`);
       }
       const clause = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-      const rows = raw.prepare(`SELECT * FROM Lot ${clause} ORDER BY lotNumber ASC`).all(...params) as Record<
-        string,
-        unknown
-      >[];
+      const rows = await q(`SELECT * FROM "Lot" ${clause} ORDER BY "lotNumber" ASC`, params);
       return rows.map(toLot);
     },
-    create({ data }: { data: { itemId: number; yearMonth: string; lotNumber: string } }): LotRow {
-      raw
-        .prepare('INSERT INTO Lot (itemId, yearMonth, lotNumber, createdAt) VALUES (?, ?, ?, ?)')
-        .run(data.itemId, data.yearMonth, data.lotNumber, nowIso());
-      return this.findUnique({ where: { itemId_yearMonth_lotNumber: data } })!;
+    async create({ data }: { data: { itemId: number; yearMonth: string; lotNumber: string } }): Promise<LotRow> {
+      await q('INSERT INTO "Lot" ("itemId", "yearMonth", "lotNumber", "createdAt") VALUES ($1, $2, $3, $4)', [
+        data.itemId,
+        data.yearMonth,
+        data.lotNumber,
+        nowIso(),
+      ]);
+      return (await this.findUnique({ where: { itemId_yearMonth_lotNumber: data } }))!;
     },
-    delete({ where }: { where: { id: number } }): void {
-      raw.prepare('DELETE FROM Lot WHERE id = ?').run(where.id);
-      raw.prepare('DELETE FROM LotCount WHERE lotId = ?').run(where.id);
+    async delete({ where }: { where: { id: number } }): Promise<void> {
+      await q('DELETE FROM "LotCount" WHERE "lotId" = $1', [where.id]);
+      await q('DELETE FROM "Lot" WHERE "id" = $1', [where.id]);
     },
   },
 
   lotCount: {
-    findMany({ where }: { where: { lotId: { in: number[] }; yearMonth: string } }): LotCountRow[] {
+    async findMany({ where }: { where: { lotId: { in: number[] }; yearMonth: string } }): Promise<LotCountRow[]> {
       if (where.lotId.in.length === 0) return [];
-      const placeholders = where.lotId.in.map(() => '?').join(',');
-      const rows = raw
-        .prepare(`SELECT * FROM LotCount WHERE yearMonth = ? AND lotId IN (${placeholders})`)
-        .all(where.yearMonth, ...where.lotId.in) as Record<string, unknown>[];
+      const placeholders = where.lotId.in.map((_, i) => `$${i + 2}`).join(',');
+      const rows = await q(`SELECT * FROM "LotCount" WHERE "yearMonth" = $1 AND "lotId" IN (${placeholders})`, [
+        where.yearMonth,
+        ...where.lotId.in,
+      ]);
       return rows.map(toLotCount);
     },
-    upsert({
+    async upsert({
       where,
       data,
     }: {
       where: { lotId_yearMonth: { lotId: number; yearMonth: string } };
       data: { count: number; recordedBy: string };
-    }): LotCountRow {
+    }): Promise<LotCountRow> {
       const { lotId, yearMonth } = where.lotId_yearMonth;
-      raw
-        .prepare(
-          `INSERT INTO LotCount (lotId, yearMonth, count, recordedBy, submittedAt)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(lotId, yearMonth) DO UPDATE SET count = excluded.count, recordedBy = excluded.recordedBy, submittedAt = excluded.submittedAt`,
-        )
-        .run(lotId, yearMonth, data.count, data.recordedBy, nowIso());
-      const row = raw.prepare('SELECT * FROM LotCount WHERE lotId = ? AND yearMonth = ?').get(
-        lotId,
-        yearMonth,
-      ) as Record<string, unknown>;
-      return toLotCount(row);
+      await q(
+        `INSERT INTO "LotCount" ("lotId", "yearMonth", "count", "recordedBy", "submittedAt")
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT ("lotId", "yearMonth") DO UPDATE SET "count" = EXCLUDED."count", "recordedBy" = EXCLUDED."recordedBy", "submittedAt" = EXCLUDED."submittedAt"`,
+        [lotId, yearMonth, data.count, data.recordedBy, nowIso()],
+      );
+      const row = await q1('SELECT * FROM "LotCount" WHERE "lotId" = $1 AND "yearMonth" = $2', [lotId, yearMonth]);
+      return toLotCount(row!);
     },
   },
 
   usageHistory: {
-    findMany({ where }: { where: { itemId: number; yearMonth: { in: string[] } } }): UsageHistoryRow[] {
+    async findMany({ where }: { where: { itemId: number; yearMonth: { in: string[] } } }): Promise<UsageHistoryRow[]> {
       if (where.yearMonth.in.length === 0) return [];
-      const placeholders = where.yearMonth.in.map(() => '?').join(',');
-      const rows = raw
-        .prepare(`SELECT * FROM UsageHistory WHERE itemId = ? AND yearMonth IN (${placeholders})`)
-        .all(where.itemId, ...where.yearMonth.in) as Record<string, unknown>[];
+      const placeholders = where.yearMonth.in.map((_, i) => `$${i + 2}`).join(',');
+      const rows = await q(`SELECT * FROM "UsageHistory" WHERE "itemId" = $1 AND "yearMonth" IN (${placeholders})`, [
+        where.itemId,
+        ...where.yearMonth.in,
+      ]);
       return rows.map(toUsage);
     },
-    upsert({
+    async upsert({
       where,
       update,
-      create,
     }: {
       where: { itemId_yearMonth: { itemId: number; yearMonth: string } };
       update: { outboundQty: number; source: string };
       create: { itemId: number; yearMonth: string; outboundQty: number; source: string };
-    }): void {
+    }): Promise<void> {
       const { itemId, yearMonth } = where.itemId_yearMonth;
-      raw
-        .prepare(
-          `INSERT INTO UsageHistory (itemId, yearMonth, outboundQty, source, createdAt)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(itemId, yearMonth) DO UPDATE SET outboundQty = excluded.outboundQty, source = excluded.source`,
-        )
-        .run(itemId, yearMonth, update.outboundQty, update.source, nowIso());
+      await q(
+        `INSERT INTO "UsageHistory" ("itemId", "yearMonth", "outboundQty", "source", "createdAt")
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT ("itemId", "yearMonth") DO UPDATE SET "outboundQty" = EXCLUDED."outboundQty", "source" = EXCLUDED."source"`,
+        [itemId, yearMonth, update.outboundQty, update.source, nowIso()],
+      );
     },
   },
 
   monthlyRecord: {
-    findUnique({
+    async findUnique({
       where,
     }: {
       where: { itemId_yearMonth: { itemId: number; yearMonth: string } };
-    }): MonthlyRecordRow | null {
+    }): Promise<MonthlyRecordRow | null> {
       const { itemId, yearMonth } = where.itemId_yearMonth;
-      const row = raw
-        .prepare('SELECT * FROM MonthlyRecord WHERE itemId = ? AND yearMonth = ?')
-        .get(itemId, yearMonth) as Record<string, unknown> | undefined;
+      const row = await q1('SELECT * FROM "MonthlyRecord" WHERE "itemId" = $1 AND "yearMonth" = $2', [
+        itemId,
+        yearMonth,
+      ]);
       return toRecord(row);
     },
-    findMany({ where }: { where: { yearMonth: string; itemId: { in: number[] } } }): MonthlyRecordRow[] {
+    async findMany({ where }: { where: { yearMonth: string; itemId: { in: number[] } } }): Promise<MonthlyRecordRow[]> {
       if (where.itemId.in.length === 0) return [];
-      const placeholders = where.itemId.in.map(() => '?').join(',');
-      const rows = raw
-        .prepare(`SELECT * FROM MonthlyRecord WHERE yearMonth = ? AND itemId IN (${placeholders})`)
-        .all(where.yearMonth, ...where.itemId.in) as Record<string, unknown>[];
+      const placeholders = where.itemId.in.map((_, i) => `$${i + 2}`).join(',');
+      const rows = await q(`SELECT * FROM "MonthlyRecord" WHERE "yearMonth" = $1 AND "itemId" IN (${placeholders})`, [
+        where.yearMonth,
+        ...where.itemId.in,
+      ]);
       return rows.map((r) => toRecord(r)!);
     },
-    upsert({
+    async upsert({
       where,
-      update,
       create,
     }: {
       where: { itemId_yearMonth: { itemId: number; yearMonth: string } };
@@ -863,28 +775,26 @@ export const db = {
         isBaseline: boolean;
         submittedAt: Date;
       };
-    }): MonthlyRecordRow {
+    }): Promise<MonthlyRecordRow> {
       const { itemId, yearMonth } = where.itemId_yearMonth;
       const now = nowIso();
-      raw
-        .prepare(
-          `INSERT INTO MonthlyRecord
-             (itemId, yearMonth, staffId, incomingQty, actualCount, previousStock, expectedCount, avgUsageUsed, variance, flagged, isBaseline, submittedAt, createdAt, updatedAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(itemId, yearMonth) DO UPDATE SET
-             staffId = excluded.staffId,
-             incomingQty = excluded.incomingQty,
-             actualCount = excluded.actualCount,
-             previousStock = excluded.previousStock,
-             expectedCount = excluded.expectedCount,
-             avgUsageUsed = excluded.avgUsageUsed,
-             variance = excluded.variance,
-             flagged = excluded.flagged,
-             isBaseline = excluded.isBaseline,
-             submittedAt = excluded.submittedAt,
-             updatedAt = excluded.updatedAt`,
-        )
-        .run(
+      await q(
+        `INSERT INTO "MonthlyRecord"
+           ("itemId", "yearMonth", "staffId", "incomingQty", "actualCount", "previousStock", "expectedCount", "avgUsageUsed", "variance", "flagged", "isBaseline", "submittedAt", "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         ON CONFLICT ("itemId", "yearMonth") DO UPDATE SET
+           "staffId" = EXCLUDED."staffId",
+           "incomingQty" = EXCLUDED."incomingQty",
+           "actualCount" = EXCLUDED."actualCount",
+           "previousStock" = EXCLUDED."previousStock",
+           "expectedCount" = EXCLUDED."expectedCount",
+           "avgUsageUsed" = EXCLUDED."avgUsageUsed",
+           "variance" = EXCLUDED."variance",
+           "flagged" = EXCLUDED."flagged",
+           "isBaseline" = EXCLUDED."isBaseline",
+           "submittedAt" = EXCLUDED."submittedAt",
+           "updatedAt" = EXCLUDED."updatedAt"`,
+        [
           itemId,
           yearMonth,
           create.staffId,
@@ -899,38 +809,43 @@ export const db = {
           create.submittedAt.toISOString(),
           now,
           now,
-        );
-      return this.findUnique({ where })!;
+        ],
+      );
+      return (await this.findUnique({ where }))!;
     },
   },
 
   purchaseOrder: {
-    findUnique({
+    async findUnique({
       where,
     }: {
       where: { itemId_targetYearMonth: { itemId: number; targetYearMonth: string } };
-    }): PurchaseOrderRow | null {
+    }): Promise<PurchaseOrderRow | null> {
       const { itemId, targetYearMonth } = where.itemId_targetYearMonth;
-      const row = raw
-        .prepare('SELECT * FROM PurchaseOrder WHERE itemId = ? AND targetYearMonth = ?')
-        .get(itemId, targetYearMonth) as Record<string, unknown> | undefined;
+      const row = await q1('SELECT * FROM "PurchaseOrder" WHERE "itemId" = $1 AND "targetYearMonth" = $2', [
+        itemId,
+        targetYearMonth,
+      ]);
       return toPurchaseOrder(row);
     },
-    findMany({ where }: { where: { targetYearMonth: string; itemId?: { in: number[] } } }): PurchaseOrderRow[] {
+    async findMany({
+      where,
+    }: {
+      where: { targetYearMonth: string; itemId?: { in: number[] } };
+    }): Promise<PurchaseOrderRow[]> {
       if (where.itemId && where.itemId.in.length === 0) return [];
       if (where.itemId) {
-        const placeholders = where.itemId.in.map(() => '?').join(',');
-        const rows = raw
-          .prepare(`SELECT * FROM PurchaseOrder WHERE targetYearMonth = ? AND itemId IN (${placeholders})`)
-          .all(where.targetYearMonth, ...where.itemId.in) as Record<string, unknown>[];
+        const placeholders = where.itemId.in.map((_, i) => `$${i + 2}`).join(',');
+        const rows = await q(
+          `SELECT * FROM "PurchaseOrder" WHERE "targetYearMonth" = $1 AND "itemId" IN (${placeholders})`,
+          [where.targetYearMonth, ...where.itemId.in],
+        );
         return rows.map((r) => toPurchaseOrder(r)!);
       }
-      const rows = raw.prepare('SELECT * FROM PurchaseOrder WHERE targetYearMonth = ?').all(
-        where.targetYearMonth,
-      ) as Record<string, unknown>[];
+      const rows = await q('SELECT * FROM "PurchaseOrder" WHERE "targetYearMonth" = $1', [where.targetYearMonth]);
       return rows.map((r) => toPurchaseOrder(r)!);
     },
-    upsert({
+    async upsert({
       where,
       update,
       create,
@@ -938,44 +853,45 @@ export const db = {
       where: { itemId_targetYearMonth: { itemId: number; targetYearMonth: string } };
       update: { orderedQty: number; orderedBy: string };
       create: { itemId: number; targetYearMonth: string; orderedQty: number; orderedAt: string; orderedBy: string };
-    }): PurchaseOrderRow {
+    }): Promise<PurchaseOrderRow> {
       const { itemId, targetYearMonth } = where.itemId_targetYearMonth;
-      const existing = this.findUnique({ where });
+      const existing = await this.findUnique({ where });
       if (existing) {
-        raw
-          .prepare('UPDATE PurchaseOrder SET orderedQty = ?, orderedBy = ? WHERE itemId = ? AND targetYearMonth = ?')
-          .run(update.orderedQty, update.orderedBy, itemId, targetYearMonth);
-        return this.findUnique({ where })!;
+        await q('UPDATE "PurchaseOrder" SET "orderedQty" = $1, "orderedBy" = $2 WHERE "itemId" = $3 AND "targetYearMonth" = $4', [
+          update.orderedQty,
+          update.orderedBy,
+          itemId,
+          targetYearMonth,
+        ]);
+        return (await this.findUnique({ where }))!;
       }
-      raw
-        .prepare(
-          `INSERT INTO PurchaseOrder (itemId, targetYearMonth, orderedQty, orderedAt, orderedBy, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(itemId, targetYearMonth, create.orderedQty, create.orderedAt, create.orderedBy, nowIso());
-      return this.findUnique({ where })!;
+      await q(
+        `INSERT INTO "PurchaseOrder" ("itemId", "targetYearMonth", "orderedQty", "orderedAt", "orderedBy", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [itemId, targetYearMonth, create.orderedQty, create.orderedAt, create.orderedBy, nowIso()],
+      );
+      return (await this.findUnique({ where }))!;
     },
-    delete({ where }: { where: { id: number } }): void {
-      raw.prepare('DELETE FROM PurchaseOrder WHERE id = ?').run(where.id);
+    async delete({ where }: { where: { id: number } }): Promise<void> {
+      await q('DELETE FROM "PurchaseOrder" WHERE "id" = $1', [where.id]);
     },
   },
 
   receipt: {
-    findUnique({ where }: { where: { id: number } }): ReceiptRow | null {
-      const row = raw.prepare('SELECT * FROM Receipt WHERE id = ?').get(where.id) as
-        | Record<string, unknown>
-        | undefined;
+    async findUnique({ where }: { where: { id: number } }): Promise<ReceiptRow | null> {
+      const row = await q1('SELECT * FROM "Receipt" WHERE "id" = $1', [where.id]);
       return row ? toReceipt(row) : null;
     },
-    findMany({ where }: { where: { purchaseOrderId: { in: number[] } } }): ReceiptRow[] {
+    async findMany({ where }: { where: { purchaseOrderId: { in: number[] } } }): Promise<ReceiptRow[]> {
       if (where.purchaseOrderId.in.length === 0) return [];
-      const placeholders = where.purchaseOrderId.in.map(() => '?').join(',');
-      const rows = raw
-        .prepare(`SELECT * FROM Receipt WHERE purchaseOrderId IN (${placeholders}) ORDER BY receivedDate ASC, id ASC`)
-        .all(...where.purchaseOrderId.in) as Record<string, unknown>[];
+      const placeholders = where.purchaseOrderId.in.map((_, i) => `$${i + 1}`).join(',');
+      const rows = await q(
+        `SELECT * FROM "Receipt" WHERE "purchaseOrderId" IN (${placeholders}) ORDER BY "receivedDate" ASC, "id" ASC`,
+        where.purchaseOrderId.in,
+      );
       return rows.map(toReceipt);
     },
-    create({
+    async create({
       data,
     }: {
       data: {
@@ -986,13 +902,11 @@ export const db = {
         recordedBy: string;
         note?: string | null;
       };
-    }): ReceiptRow {
-      raw
-        .prepare(
-          `INSERT INTO Receipt (purchaseOrderId, receivedQty, receivedDate, hasPackingSlip, recordedBy, note, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
+    }): Promise<ReceiptRow> {
+      const row = await q1(
+        `INSERT INTO "Receipt" ("purchaseOrderId", "receivedQty", "receivedDate", "hasPackingSlip", "recordedBy", "note", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [
           data.purchaseOrderId,
           data.receivedQty,
           data.receivedDate,
@@ -1000,41 +914,38 @@ export const db = {
           data.recordedBy,
           data.note ?? null,
           nowIso(),
-        );
-      const row = raw.prepare('SELECT * FROM Receipt WHERE id = last_insert_rowid()').get() as Record<
-        string,
-        unknown
-      >;
-      return toReceipt(row);
+        ],
+      );
+      return toReceipt(row!);
     },
-    update({
+    async update({
       where,
       data,
     }: {
       where: { id: number };
       data: { receivedQty?: number; receivedDate?: string; hasPackingSlip?: boolean; note?: string | null };
-    }): ReceiptRow {
+    }): Promise<ReceiptRow> {
       if (data.receivedQty !== undefined) {
-        raw.prepare('UPDATE Receipt SET receivedQty = ? WHERE id = ?').run(data.receivedQty, where.id);
+        await q('UPDATE "Receipt" SET "receivedQty" = $1 WHERE "id" = $2', [data.receivedQty, where.id]);
       }
       if (data.receivedDate !== undefined) {
-        raw.prepare('UPDATE Receipt SET receivedDate = ? WHERE id = ?').run(data.receivedDate, where.id);
+        await q('UPDATE "Receipt" SET "receivedDate" = $1 WHERE "id" = $2', [data.receivedDate, where.id]);
       }
       if (data.hasPackingSlip !== undefined) {
-        raw.prepare('UPDATE Receipt SET hasPackingSlip = ? WHERE id = ?').run(data.hasPackingSlip ? 1 : 0, where.id);
+        await q('UPDATE "Receipt" SET "hasPackingSlip" = $1 WHERE "id" = $2', [data.hasPackingSlip ? 1 : 0, where.id]);
       }
       if (data.note !== undefined) {
-        raw.prepare('UPDATE Receipt SET note = ? WHERE id = ?').run(data.note, where.id);
+        await q('UPDATE "Receipt" SET "note" = $1 WHERE "id" = $2', [data.note, where.id]);
       }
-      return this.findUnique({ where })!;
+      return (await this.findUnique({ where }))!;
     },
-    delete({ where }: { where: { id: number } }): void {
-      raw.prepare('DELETE FROM Receipt WHERE id = ?').run(where.id);
+    async delete({ where }: { where: { id: number } }): Promise<void> {
+      await q('DELETE FROM "Receipt" WHERE "id" = $1', [where.id]);
     },
   },
 
   changeLog: {
-    create({
+    async create({
       data,
     }: {
       data: {
@@ -1045,27 +956,27 @@ export const db = {
         newValue: number;
         changedBy: string;
       };
-    }): void {
-      raw
-        .prepare(
-          `INSERT INTO ChangeLog (entityType, entityKey, field, oldValue, newValue, changedBy, changedAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(data.entityType, data.entityKey, data.field, data.oldValue, data.newValue, data.changedBy, nowIso());
+    }): Promise<void> {
+      await q(
+        `INSERT INTO "ChangeLog" ("entityType", "entityKey", "field", "oldValue", "newValue", "changedBy", "changedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [data.entityType, data.entityKey, data.field, data.oldValue, data.newValue, data.changedBy, nowIso()],
+      );
     },
-    findByType(entityType: string): ChangeLogRow[] {
-      const rows = raw.prepare('SELECT * FROM ChangeLog WHERE entityType = ? ORDER BY id ASC').all(
-        entityType,
-      ) as Record<string, unknown>[];
+    async findByType(entityType: string): Promise<ChangeLogRow[]> {
+      const rows = await q('SELECT * FROM "ChangeLog" WHERE "entityType" = $1 ORDER BY "id" ASC', [entityType]);
       return rows.map(toChangeLog);
     },
   },
 
   auditLog: {
-    create({ data }: { data: { actorId: string; action: string; detail: string } }): void {
-      raw
-        .prepare('INSERT INTO AuditLog (actorId, action, detail, createdAt) VALUES (?, ?, ?, ?)')
-        .run(data.actorId, data.action, data.detail, nowIso());
+    async create({ data }: { data: { actorId: string; action: string; detail: string } }): Promise<void> {
+      await q('INSERT INTO "AuditLog" ("actorId", "action", "detail", "createdAt") VALUES ($1, $2, $3, $4)', [
+        data.actorId,
+        data.action,
+        data.detail,
+        nowIso(),
+      ]);
     },
   },
 };
