@@ -23,10 +23,12 @@ type ItemRow = {
 const DEFAULT_COLOR = '#3b82f6';
 
 export default function AdminPanel({
+  currentStaffId,
   initialStaff,
   initialSuppliers,
   initialItems,
 }: {
+  currentStaffId: string;
   initialStaff: StaffRow[];
   initialSuppliers: SupplierRow[];
   initialItems: ItemRow[];
@@ -38,8 +40,10 @@ export default function AdminPanel({
 
   const [newStaffId, setNewStaffId] = useState('');
   const [newStaffName, setNewStaffName] = useState('');
+  const [newStaffRole, setNewStaffRole] = useState<'STAFF' | 'MASTER'>('STAFF');
   const [staffError, setStaffError] = useState<string | null>(null);
   const [staffSaving, setStaffSaving] = useState(false);
+  const [roleError, setRoleError] = useState<Record<string, string>>({});
 
   const [newSupplier, setNewSupplier] = useState({ name: '', color: DEFAULT_COLOR, contactName: '', contactPhone: '' });
   const [supplierError, setSupplierError] = useState<string | null>(null);
@@ -80,7 +84,7 @@ export default function AdminPanel({
       const res = await fetch('/api/admin/staff', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: newStaffId.trim(), name: newStaffName.trim() }),
+        body: JSON.stringify({ id: newStaffId.trim(), name: newStaffName.trim(), role: newStaffRole }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -90,8 +94,25 @@ export default function AdminPanel({
       setStaffList((s) => [...s, { id: data.staff.id, name: data.staff.name, role: data.staff.role, active: true }]);
       setNewStaffId('');
       setNewStaffName('');
+      setNewStaffRole('STAFF');
     } finally {
       setStaffSaving(false);
+    }
+  }
+
+  async function changeStaffRole(id: string, role: 'STAFF' | 'MASTER') {
+    setRoleError((e) => ({ ...e, [id]: '' }));
+    const prev = staffList.find((s) => s.id === id)?.role;
+    setStaffList((s) => s.map((st) => (st.id === id ? { ...st, role } : st)));
+    const res = await fetch('/api/admin/staff', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, role }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      setStaffList((s) => s.map((st) => (st.id === id ? { ...st, role: prev ?? st.role } : st)));
+      setRoleError((e) => ({ ...e, [id]: data?.error ?? '변경에 실패했습니다.' }));
     }
   }
 
@@ -316,6 +337,17 @@ export default function AdminPanel({
               placeholder="홍길동"
             />
           </div>
+          <div>
+            <label className="mb-1 block text-xs text-slate-500">권한</label>
+            <select
+              value={newStaffRole}
+              onChange={(e) => setNewStaffRole(e.target.value as 'STAFF' | 'MASTER')}
+              className="rounded border border-slate-300 px-2 py-1 text-sm"
+            >
+              <option value="STAFF">담당자</option>
+              <option value="MASTER">마스터</option>
+            </select>
+          </div>
           <button
             type="submit"
             disabled={staffSaving}
@@ -339,7 +371,21 @@ export default function AdminPanel({
               <tr key={s.id} className="border-t border-slate-100">
                 <td className="py-1.5 font-mono text-xs">{s.id}</td>
                 <td className="py-1.5">{s.name}</td>
-                <td className="py-1.5 text-slate-500">{s.role === 'MASTER' ? '마스터' : '담당자'}</td>
+                <td className="py-1.5">
+                  {s.id === currentStaffId ? (
+                    <span className="text-slate-500">{s.role === 'MASTER' ? '마스터' : '담당자'} (본인)</span>
+                  ) : (
+                    <select
+                      value={s.role}
+                      onChange={(e) => changeStaffRole(s.id, e.target.value as 'STAFF' | 'MASTER')}
+                      className="rounded border border-slate-300 px-2 py-1 text-sm"
+                    >
+                      <option value="STAFF">담당자</option>
+                      <option value="MASTER">마스터</option>
+                    </select>
+                  )}
+                  {roleError[s.id] && <p className="mt-1 text-xs text-red-600">{roleError[s.id]}</p>}
+                </td>
               </tr>
             ))}
           </tbody>

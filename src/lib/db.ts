@@ -434,6 +434,10 @@ export const db = {
       }
       return this.create({ data: create });
     },
+    async update({ where, data }: { where: { id: string }; data: { role: Role } }): Promise<StaffRow> {
+      await q('UPDATE "Staff" SET "role" = $1 WHERE "id" = $2', [data.role, where.id]);
+      return (await this.findUnique({ where }))!;
+    },
   },
 
   item: {

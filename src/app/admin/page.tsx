@@ -29,6 +29,7 @@ export default async function AdminPage() {
       </header>
 
       <AdminPanel
+        currentStaffId={staff.id}
         initialStaff={allStaff.map((s) => ({ id: s.id, name: s.name, role: s.role, active: s.active }))}
         initialSuppliers={allSuppliers.map((s) => ({
           id: s.id,
