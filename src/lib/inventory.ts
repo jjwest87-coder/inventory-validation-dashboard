@@ -182,7 +182,29 @@ export async function recordActualCount(itemId: number, yearMonth: string, actua
     });
   }
 
+  // A correction here changes this month's previousStock/derived usage, which the next
+  // month's (already-saved) expectedCount and avgUsageUsed were computed from — replay it
+  // forward so a retroactive fix doesn't leave later months' 판정 stuck on stale numbers.
+  await cascadeRecalculate(itemId, yearMonth);
+
   return record;
+}
+
+/**
+ * After a month's actualCount is (re)saved, the next month's already-saved record — if any —
+ * was computed from this month's previousStock/usage before this save, so it's now stale.
+ * Re-running it (same count, same staff — nothing about *what was counted* changed) recomputes
+ * its expectedCount/avgUsageUsed/variance and derived usage, and recurses to the month after
+ * that, carrying the fix forward as far as saved records go.
+ */
+async function cascadeRecalculate(itemId: number, yearMonth: string) {
+  const nextMonth = nextYearMonth(yearMonth);
+  const nextRecord = await db.monthlyRecord.findUnique({
+    where: { itemId_yearMonth: { itemId, yearMonth: nextMonth } },
+  });
+  if (!nextRecord || nextRecord.actualCount == null) return;
+
+  await recordActualCount(itemId, nextMonth, nextRecord.actualCount, nextRecord.staffId);
 }
 
 /**
