@@ -251,9 +251,10 @@ async function ensureSchema(): Promise<void> {
       "createdAt" TEXT NOT NULL
     )`,
   ];
-  for (const stmt of statements) {
-    await sql.query(stmt);
-  }
+  // Run every CREATE TABLE as one batched round trip (in order, inside a
+  // transaction) instead of awaiting them one at a time — on a cold start
+  // that was 12 sequential requests to the DB before any real query ran.
+  await sql.transaction(statements.map((stmt) => sql.query(stmt)));
 }
 
 let readyPromise: Promise<void> | null = null;
