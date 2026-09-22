@@ -464,14 +464,37 @@ export const db = {
       const dir = args.orderBy?.code === 'desc' ? 'DESC' : 'ASC';
       const rows = await q(`SELECT * FROM "Item" ${where} ORDER BY "code" ${dir}`, params);
       const items = rows.map((r) => toItem(r)!);
+      // Batch-fetch related staff/suppliers in one round trip each instead of
+      // one findUnique per item — with ~140 items that was ~280 sequential
+      // round trips (the main cause of the admin screen's 10-15s load time).
       if (args.include?.assignee) {
+        const ids = [...new Set(items.map((i) => i.assigneeId).filter((id): id is string => id != null))];
+        const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
+        const staffById = new Map(
+          ids.length
+            ? (await q<Record<string, unknown>>(`SELECT * FROM "Staff" WHERE "id" IN (${placeholders})`, ids)).map((r) => [
+                r.id as string,
+                toStaff(r)!,
+              ])
+            : [],
+        );
         for (const item of items) {
-          item.assignee = item.assigneeId ? await db.staff.findUnique({ where: { id: item.assigneeId } }) : null;
+          item.assignee = item.assigneeId ? (staffById.get(item.assigneeId) ?? null) : null;
         }
       }
       if (args.include?.supplier) {
+        const ids = [...new Set(items.map((i) => i.supplierId).filter((id): id is number => id != null))];
+        const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
+        const supplierById = new Map(
+          ids.length
+            ? (await q<Record<string, unknown>>(`SELECT * FROM "Supplier" WHERE "id" IN (${placeholders})`, ids)).map((r) => [
+                r.id as number,
+                toSupplier(r),
+              ])
+            : [],
+        );
         for (const item of items) {
-          item.supplier = item.supplierId ? await db.supplier.findUnique({ where: { id: item.supplierId } }) : null;
+          item.supplier = item.supplierId ? (supplierById.get(item.supplierId) ?? null) : null;
         }
       }
       return items;
