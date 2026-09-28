@@ -46,6 +46,11 @@ function recomputeAggregates(row: Row): Row {
   return { ...row, totalReceived, remainingQty, status };
 }
 
+/** Saved packing-slip state for a row: checked only when every recorded receipt has one. */
+function savedSlip(row: Row) {
+  return row.receipts.length > 0 && row.receipts.every((r) => r.hasPackingSlip);
+}
+
 function todayDateString() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -82,7 +87,7 @@ export default function ReceivingTable({
     Object.fromEntries(
       initialRows.map((r) => [
         r.itemId,
-        { qty: '', date: r.lastReceivedDate ?? todayDateString(), slip: false, note: '' },
+        { qty: '', date: r.lastReceivedDate ?? todayDateString(), slip: savedSlip(r), note: '' },
       ]),
     ),
   );
@@ -141,12 +146,8 @@ export default function ReceivingTable({
       setHistoryError((e) => ({ ...e, [receiptId]: data.error ?? '수정에 실패했습니다.' }));
       return;
     }
-    setRows((rs) =>
-      rs.map((r) => {
-        if (r.itemId !== itemId) return r;
-        const receipts = r.receipts.map((rc) => (rc.id === receiptId ? { ...rc, ...data.receipt } : rc));
-        return recomputeAggregates({ ...r, receipts });
-      }),
+    replaceReceipts(itemId, (receipts) =>
+      receipts.map((rc) => (rc.id === receiptId ? { ...rc, ...data.receipt } : rc)),
     );
     setHistoryError((e) => ({ ...e, [receiptId]: '' }));
     setEditingReceiptId(null);
@@ -164,13 +165,16 @@ export default function ReceivingTable({
       setHistoryError((e) => ({ ...e, [receiptId]: data.error ?? '삭제에 실패했습니다.' }));
       return;
     }
-    setRows((rs) =>
-      rs.map((r) => {
-        if (r.itemId !== itemId) return r;
-        const receipts = r.receipts.filter((rc) => rc.id !== receiptId);
-        return recomputeAggregates({ ...r, receipts });
-      }),
-    );
+    replaceReceipts(itemId, (receipts) => receipts.filter((rc) => rc.id !== receiptId));
+  }
+
+  /** Updates a row's receipt list and keeps its 명세서 checkbox in sync with what is saved. */
+  function replaceReceipts(itemId: number, update: (receipts: Receipt[]) => Receipt[]) {
+    const row = rows.find((r) => r.itemId === itemId);
+    if (!row) return;
+    const next = recomputeAggregates({ ...row, receipts: update(row.receipts) });
+    setRows((rs) => rs.map((r) => (r.itemId === itemId ? next : r)));
+    setForms((f) => ({ ...f, [itemId]: { ...f[itemId], slip: savedSlip(next) } }));
   }
 
   function updateForm(itemId: number, field: 'qty' | 'date' | 'slip' | 'note', value: string | boolean) {
@@ -254,7 +258,13 @@ export default function ReceivingTable({
         note: forms[r.itemId].note || undefined,
       }));
 
-    if (entries.length === 0) {
+    // Rows with no new quantity whose 명세서 checkbox was changed: apply it to the
+    // already-recorded receipts of that row.
+    const slipOnlyRows = rows.filter(
+      (r) => forms[r.itemId].qty === '' && r.receipts.length > 0 && forms[r.itemId].slip !== savedSlip(r),
+    );
+
+    if (entries.length === 0 && slipOnlyRows.length === 0) {
       setSummary('입력된 값이 없습니다.');
       return;
     }
@@ -263,55 +273,90 @@ export default function ReceivingTable({
     setSummary(null);
     setRowError({});
     try {
-      const res = await fetch('/api/receipts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetYearMonth, receipts: entries }),
-      });
-      const data = await res.json();
-
-      if (res.status !== 200) {
-        setSummary(data.error ?? '저장에 실패했습니다.');
-        return;
-      }
-
       const newErrors: Record<number, string> = {};
+      const updatedRows = new Map<number, Row>();
       let successCount = 0;
       let failCount = 0;
 
-      for (const result of data.results) {
-        if (result.ok) {
-          successCount++;
-          const recordedByName = data.recordedByName ?? '';
-          setRows((rs) =>
-            rs.map((r) => {
-              if (r.itemId !== result.itemId) return r;
-              const newReceipt: Receipt = {
-                id: result.receipt.id,
-                receivedQty: result.receipt.receivedQty,
-                receivedDate: result.receipt.receivedDate,
-                hasPackingSlip: result.receipt.hasPackingSlip,
-                recordedByName,
-                note: result.receipt.note,
-              };
-              return recomputeAggregates({
-                ...r,
-                receipts: [...r.receipts, newReceipt],
+      if (entries.length > 0) {
+        const res = await fetch('/api/receipts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetYearMonth, receipts: entries }),
+        });
+        const data = await res.json();
+
+        if (res.status !== 200) {
+          setSummary(data.error ?? '저장에 실패했습니다.');
+          return;
+        }
+
+        const recordedByName = data.recordedByName ?? '';
+        for (const result of data.results) {
+          if (result.ok) {
+            successCount++;
+            const row = rows.find((r) => r.itemId === result.itemId)!;
+            const newReceipt: Receipt = {
+              id: result.receipt.id,
+              receivedQty: result.receipt.receivedQty,
+              receivedDate: result.receipt.receivedDate,
+              hasPackingSlip: result.receipt.hasPackingSlip,
+              recordedByName,
+              note: result.receipt.note,
+            };
+            updatedRows.set(
+              row.itemId,
+              recomputeAggregates({
+                ...row,
+                receipts: [...row.receipts, newReceipt],
                 lastReceivedDate: result.receipt.receivedDate,
-              });
-            }),
-          );
-          setForms((f) => ({
-            ...f,
-            // Only clear the quantity so the same amount isn't accidentally resubmitted —
-            // date and packing-slip usually stay the same for the next item in the same shipment.
-            [result.itemId]: { qty: '', date: f[result.itemId].date, slip: f[result.itemId].slip, note: '' },
-          }));
-        } else {
-          failCount++;
-          newErrors[result.itemId] = result.error ?? '저장 실패';
+              }),
+            );
+          } else {
+            failCount++;
+            newErrors[result.itemId] = result.error ?? '저장 실패';
+          }
         }
       }
+
+      for (const row of slipOnlyRows) {
+        const slip = forms[row.itemId].slip;
+        const results = await Promise.all(
+          row.receipts
+            .filter((rc) => rc.hasPackingSlip !== slip)
+            .map(async (rc) => {
+              const res = await fetch('/api/receipts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ receiptId: rc.id, hasPackingSlip: slip }),
+              });
+              return res.ok ? rc.id : null;
+            }),
+        );
+        const updatedIds = new Set(results.filter((id): id is number => id !== null));
+        if (updatedIds.size < results.length) {
+          failCount++;
+          newErrors[row.itemId] = '명세서 저장 실패';
+        } else {
+          successCount++;
+        }
+        updatedRows.set(row.itemId, {
+          ...row,
+          receipts: row.receipts.map((rc) => (updatedIds.has(rc.id) ? { ...rc, hasPackingSlip: slip } : rc)),
+        });
+      }
+
+      setRows((rs) => rs.map((r) => updatedRows.get(r.itemId) ?? r));
+      setForms((f) => {
+        const next = { ...f };
+        for (const [itemId, row] of updatedRows) {
+          // Only clear the quantity so the same amount isn't accidentally resubmitted —
+          // the date usually stays the same for the next item in the same shipment.
+          // The checkbox is reset to what is now saved for the row.
+          next[itemId] = { qty: '', date: f[itemId].date, slip: savedSlip(row), note: '' };
+        }
+        return next;
+      });
 
       setRowError(newErrors);
       setSummary(failCount > 0 ? `${successCount}건 저장, ${failCount}건 실패` : `${successCount}건 저장 완료`);
