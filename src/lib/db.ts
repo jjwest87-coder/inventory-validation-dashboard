@@ -125,10 +125,30 @@ function getSql() {
   return sqlClient;
 }
 
+// Transient network failures between the function and Neon (e.g. "fetch failed"
+// caused by ETIMEDOUT) surface as NeonDbError "Error connecting to database".
+function isConnectionError(err: unknown): boolean {
+  return err instanceof Error && /Error connecting to database|fetch failed/i.test(err.message);
+}
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts || !isConnectionError(err)) throw err;
+      await new Promise((r) => setTimeout(r, 300 * i));
+    }
+  }
+}
+
 async function q<T = Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
-  await ready;
+  await ensureReady();
   const sql = getSql();
-  return (await sql.query(text, params)) as unknown as T[];
+  const run = async () => (await sql.query(text, params)) as unknown as T[];
+  // Only reads are retried: a timed-out write may still have been applied, and
+  // replaying a plain INSERT (Receipt, ChangeLog, ...) could duplicate it.
+  return /^\s*SELECT\b/i.test(text) ? withRetry(run) : run();
 }
 
 async function q1<T = Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T | undefined> {
@@ -257,11 +277,19 @@ async function ensureSchema(): Promise<void> {
   await sql.transaction(statements.map((stmt) => sql.query(stmt)));
 }
 
+// Run the schema check once per instance, on the first query. A failure is not
+// cached: it is cleared so the next request tries again instead of every query
+// on this warm instance failing with the same stale rejection.
 let readyPromise: Promise<void> | null = null;
-const ready = new Promise<void>((resolve, reject) => {
-  readyPromise = ensureSchema().then(resolve, reject);
-});
-void readyPromise;
+function ensureReady(): Promise<void> {
+  if (!readyPromise) {
+    readyPromise = withRetry(ensureSchema).catch((err) => {
+      readyPromise = null;
+      throw err;
+    });
+  }
+  return readyPromise;
+}
 
 function nowIso() {
   return new Date().toISOString();
