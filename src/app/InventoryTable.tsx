@@ -36,6 +36,11 @@ function round1(n: number) {
   return Math.round(n * 10) / 10;
 }
 
+/** Strips float noise (14.899999999999999 → 14.9) without cutting real decimals. */
+function cleanNum(n: number) {
+  return Math.round(n * 1e6) / 1e6;
+}
+
 /** True when stock rose with no incoming this month — physically shouldn't happen without a shipment. */
 function isNoIncomingIncrease(row: Row): boolean {
   return (
@@ -52,9 +57,9 @@ function CorrectionNote({ history }: { history: HistoryEntry[] }) {
   const hasCorrection = history.some((h, i) => i > 0 || h.oldValue != null);
   if (!hasCorrection) return null;
   const first = history[0].oldValue;
-  const chain = (first != null ? [first, ...history.map((h) => h.newValue)] : history.map((h) => h.newValue)).join(
-    ' → ',
-  );
+  const chain = (first != null ? [first, ...history.map((h) => h.newValue)] : history.map((h) => h.newValue))
+    .map(cleanNum)
+    .join(' → ');
   const last = history[history.length - 1];
   return (
     <p className="mt-1 text-[11px] text-amber-600 print:hidden">
@@ -385,9 +390,11 @@ export default function InventoryTable({
                           <div className="mt-0.5 flex items-center gap-1">
                             <span className="w-20 text-right text-xs font-semibold text-slate-500">합계</span>
                             <span className="w-14 text-center text-base font-bold text-blue-700">
-                              {row.lots.reduce(
-                                (sum, lot) => sum + (Number(lotDrafts[row.itemId]?.[lot.id]) || 0),
-                                0,
+                              {cleanNum(
+                                row.lots.reduce(
+                                  (sum, lot) => sum + (Number(lotDrafts[row.itemId]?.[lot.id]) || 0),
+                                  0,
+                                ),
                               )}
                             </span>
                           </div>

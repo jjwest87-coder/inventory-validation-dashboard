@@ -224,7 +224,8 @@ export async function recordLotCounts(
       data: { count, recordedBy: staffId },
     });
   }
-  const sum = lotCounts.reduce((total, l) => total + l.count, 0);
+  // Round away float noise from summing decimals (1 + 13.9 = 14.899999999999999).
+  const sum = Math.round(lotCounts.reduce((total, l) => total + l.count, 0) * 1e6) / 1e6;
   return recordActualCount(itemId, yearMonth, sum, staffId);
 }
 
