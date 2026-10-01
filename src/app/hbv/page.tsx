@@ -53,10 +53,9 @@ export default async function HbvPage({ searchParams }: { searchParams: Promise<
   }
   const yearMonth = `${year}-${String(month).padStart(2, '0')}`;
 
-  const [records, lots, receivedDates, nextOrders] = await Promise.all([
+  const [records, lots, nextOrders] = await Promise.all([
     db.monthlyRecord.findMany({ where: { yearMonth, itemId: { in: itemIds } } }),
     db.lot.findMany({ where: { yearMonth } }),
-    db.lotReceivedDate.findMany({ where: { itemId: { in: itemIds } } }),
     db.purchaseOrder.findMany({ where: { targetYearMonth: nextYearMonth(yearMonth), itemId: { in: itemIds } } }),
   ]);
   // Items with a 다음달 발주 on the dashboard get an extra blank row to hand-write the incoming LOT.
@@ -65,7 +64,6 @@ export default async function HbvPage({ searchParams }: { searchParams: Promise<
   const relevantLots = lots.filter((l) => itemIds.includes(l.itemId));
   const lotCounts = await db.lotCount.findMany({ where: { lotId: { in: relevantLots.map((l) => l.id) }, yearMonth } });
   const countByLotId = new Map(lotCounts.map((lc) => [lc.lotId, lc.count]));
-  const receivedDateByKey = new Map(receivedDates.map((r) => [`${r.itemId}:${r.lotNumber}`, r.receivedDate]));
 
   const groups: HbvGroup[] = GROUPS.map((g) => {
     const rows: HbvRow[] = [];
@@ -81,30 +79,20 @@ export default async function HbvPage({ searchParams }: { searchParams: Promise<
           if (count == null) continue;
           const qty = unopened(count);
           if (qty <= 0) continue;
-          itemRows.push({
-            ...base,
-            lotNumber: lot.lotNumber,
-            qty,
-            receivedDate: receivedDateByKey.get(`${item.id}:${lot.lotNumber}`) ?? '',
-          });
+          itemRows.push({ ...base, lotNumber: lot.lotNumber, qty });
         }
       } else {
         const actual = recordByItem.get(item.id)?.actualCount;
         if (actual != null && unopened(actual) > 0) {
-          itemRows.push({
-            ...base,
-            lotNumber: '',
-            qty: unopened(actual),
-            receivedDate: receivedDateByKey.get(`${item.id}:`) ?? '',
-          });
+          itemRows.push({ ...base, lotNumber: '', qty: unopened(actual) });
         }
       }
       if (orderedItemIds.has(item.id)) {
-        itemRows.push({ ...base, lotNumber: '', qty: null, receivedDate: '', blank: true });
+        itemRows.push({ ...base, lotNumber: '', qty: null, blank: true });
       }
       // Keep every item on the sheet even when nothing unopened is left.
       if (itemRows.length === 0) {
-        itemRows.push({ ...base, lotNumber: '', qty: 0, receivedDate: receivedDateByKey.get(`${item.id}:`) ?? '' });
+        itemRows.push({ ...base, lotNumber: '', qty: 0 });
       }
       rows.push(...itemRows);
     });
