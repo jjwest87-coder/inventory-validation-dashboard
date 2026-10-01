@@ -1,10 +1,9 @@
 import { redirect } from 'next/navigation';
-import Link from 'next/link';
 import { db } from '@/lib/db';
 import { getCurrentStaff } from '@/lib/auth';
 import { previousYearMonth, nextYearMonth, getHistoryMap, averageUsage } from '@/lib/inventory';
 import InventoryTable from './InventoryTable';
-import LogoutButton from './LogoutButton';
+import NavBar from './NavBar';
 import PeriodFilter from './PeriodFilter';
 
 type SearchParams = { year?: string; month?: string; assignee?: string };
@@ -136,31 +135,14 @@ export default async function DashboardPage({
   const assigneeLabel = assigneeFilter === 'all' ? '전체' : (staffNameById.get(assigneeFilter) ?? assigneeFilter);
 
   return (
+    <>
+    <NavBar isMaster={staff.role === 'MASTER'} />
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3 print:hidden">
-        <div>
-          <h1 className="text-lg font-semibold text-slate-900">재고 파악 대시보드</h1>
-          <p className="text-sm text-slate-500">
-            {yearMonth} · {assigneeLabel} 담당 품목 {items.length}건
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Link
-            href="/receiving"
-            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
-          >
-            입고 관리
-          </Link>
-          {staff.role === 'MASTER' && (
-            <Link
-              href="/admin"
-              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
-            >
-              관리자 화면
-            </Link>
-          )}
-          <LogoutButton />
-        </div>
+      <header className="print:hidden">
+        <h1 className="text-lg font-semibold text-slate-900">재고 파악 대시보드</h1>
+        <p className="text-sm text-slate-500">
+          {yearMonth} · {assigneeLabel} 담당 품목 {items.length}건
+        </p>
       </header>
 
       <h1 className="hidden text-base font-semibold text-black print:block">
@@ -187,5 +169,6 @@ export default async function DashboardPage({
         />
       )}
     </div>
+    </>
   );
 }

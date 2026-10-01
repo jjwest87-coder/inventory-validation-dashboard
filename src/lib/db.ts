@@ -84,6 +84,16 @@ export interface LotCountRow {
   submittedAt: Date;
 }
 
+// 입고일 for a LOT, keyed by item + lot number (not month) so it is entered once and
+// carries over to every later month's HBV 관리 sheet. lotNumber '' = item without LOTs.
+export interface LotReceivedDateRow {
+  itemId: number;
+  lotNumber: string;
+  receivedDate: string;
+  updatedBy: string;
+  updatedAt: Date;
+}
+
 export interface ChangeLogRow {
   id: number;
   entityType: string;
@@ -262,6 +272,14 @@ async function ensureSchema(): Promise<void> {
       "recordedBy" TEXT NOT NULL REFERENCES "Staff"("id"),
       "submittedAt" TEXT NOT NULL,
       UNIQUE("lotId", "yearMonth")
+    )`,
+    `CREATE TABLE IF NOT EXISTS "LotReceivedDate" (
+      "itemId" INTEGER NOT NULL REFERENCES "Item"("id"),
+      "lotNumber" TEXT NOT NULL,
+      "receivedDate" TEXT NOT NULL,
+      "updatedBy" TEXT NOT NULL REFERENCES "Staff"("id"),
+      "updatedAt" TEXT NOT NULL,
+      PRIMARY KEY ("itemId", "lotNumber")
     )`,
     `CREATE TABLE IF NOT EXISTS "AuditLog" (
       "id" SERIAL PRIMARY KEY,
@@ -747,6 +765,39 @@ export const db = {
       );
       const row = await q1('SELECT * FROM "LotCount" WHERE "lotId" = $1 AND "yearMonth" = $2', [lotId, yearMonth]);
       return toLotCount(row!);
+    },
+  },
+
+  lotReceivedDate: {
+    async findMany({ where }: { where: { itemId: { in: number[] } } }): Promise<LotReceivedDateRow[]> {
+      if (where.itemId.in.length === 0) return [];
+      const placeholders = where.itemId.in.map((_, i) => `$${i + 1}`).join(',');
+      const rows = await q(`SELECT * FROM "LotReceivedDate" WHERE "itemId" IN (${placeholders})`, where.itemId.in);
+      return rows.map((row) => ({
+        itemId: row.itemId as number,
+        lotNumber: row.lotNumber as string,
+        receivedDate: row.receivedDate as string,
+        updatedBy: row.updatedBy as string,
+        updatedAt: new Date(row.updatedAt as string),
+      }));
+    },
+    async upsert({
+      data,
+    }: {
+      data: { itemId: number; lotNumber: string; receivedDate: string; updatedBy: string };
+    }): Promise<void> {
+      await q(
+        `INSERT INTO "LotReceivedDate" ("itemId", "lotNumber", "receivedDate", "updatedBy", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT ("itemId", "lotNumber") DO UPDATE SET "receivedDate" = EXCLUDED."receivedDate", "updatedBy" = EXCLUDED."updatedBy", "updatedAt" = EXCLUDED."updatedAt"`,
+        [data.itemId, data.lotNumber, data.receivedDate, data.updatedBy, nowIso()],
+      );
+    },
+    async delete({ where }: { where: { itemId: number; lotNumber: string } }): Promise<void> {
+      await q('DELETE FROM "LotReceivedDate" WHERE "itemId" = $1 AND "lotNumber" = $2', [
+        where.itemId,
+        where.lotNumber,
+      ]);
     },
   },
 

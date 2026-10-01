@@ -1,8 +1,7 @@
 import { redirect } from 'next/navigation';
-import Link from 'next/link';
 import { db } from '@/lib/db';
 import { getCurrentStaff } from '@/lib/auth';
-import LogoutButton from '../LogoutButton';
+import NavBar from '../NavBar';
 import PeriodFilter from '../PeriodFilter';
 import ReceivingTable from './ReceivingTable';
 
@@ -109,23 +108,14 @@ export default async function ReceivingPage({ searchParams }: { searchParams: Pr
     ) : null;
 
   return (
+    <>
+    <NavBar isMaster={staff.role === 'MASTER'} />
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold text-slate-900">입고 관리</h1>
-          <p className="text-sm text-slate-500">
-            {targetYearMonth} 발주 {rows.length}건 · 담당자별 발주량을 모아 입고 현황을 확인합니다.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Link
-            href="/"
-            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
-          >
-            대시보드로
-          </Link>
-          <LogoutButton />
-        </div>
+      <header>
+        <h1 className="text-lg font-semibold text-slate-900">입고 관리</h1>
+        <p className="text-sm text-slate-500">
+          {targetYearMonth} 발주 {rows.length}건 · 담당자별 발주량을 모아 입고 현황을 확인합니다.
+        </p>
       </header>
 
       <PeriodFilter basePath="/receiving" year={year} month={month} summary={summary} />
@@ -143,5 +133,6 @@ export default async function ReceivingPage({ searchParams }: { searchParams: Pr
         />
       )}
     </div>
+    </>
   );
 }

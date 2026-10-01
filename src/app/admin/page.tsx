@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import Link from 'next/link';
+import NavBar from '../NavBar';
 import { db } from '@/lib/db';
 import { getCurrentStaff } from '@/lib/auth';
 import AdminPanel from './AdminPanel';
@@ -17,15 +17,12 @@ export default async function AdminPage() {
   ]);
 
   return (
+    <>
+    <NavBar isMaster />
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-slate-900">관리자 화면</h1>
-          <p className="text-sm text-slate-500">담당자 추가, 품목 추가/담당자·입고처 변경, 입고처 관리.</p>
-        </div>
-        <Link href="/" className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100">
-          대시보드로
-        </Link>
+      <header>
+        <h1 className="text-lg font-semibold text-slate-900">관리자 화면</h1>
+        <p className="text-sm text-slate-500">담당자 추가, 품목 추가/담당자·입고처 변경, 입고처 관리.</p>
       </header>
 
       <AdminPanel
@@ -55,5 +52,6 @@ export default async function AdminPage() {
         }))}
       />
     </div>
+    </>
   );
 }
