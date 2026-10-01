@@ -8,8 +8,10 @@ export type HbvRow = {
   code: string;
   name: string;
   lotNumber: string;
-  qty: number;
+  qty: number | null;
   receivedDate: string;
+  // Placeholder row for a 다음달 발주 not yet received — LOT/입고일/수량 are written by hand.
+  blank: boolean;
 };
 
 export type HbvGroup = { key: string; title: string; storage: string; rows: HbvRow[] };
@@ -20,7 +22,7 @@ const USE_SLOTS = 10;
 const cell = 'border border-slate-400 px-1.5 py-1 print:border-black print:px-1 print:py-0';
 
 function rowKey(r: HbvRow) {
-  return `${r.itemId}:${r.lotNumber}`;
+  return r.blank ? `${r.itemId}:blank` : `${r.itemId}:${r.lotNumber}`;
 }
 
 function ReceivedDateInput({ row }: { row: HbvRow }) {
@@ -123,7 +125,7 @@ function GroupTable({ group, yearMonth }: { group: HbvGroup; yearMonth: string }
                     <td rowSpan={2} className={`${cell} text-left leading-tight`}>{r.name}</td>
                     <td rowSpan={2} className={`${cell} font-mono`}>{r.lotNumber}</td>
                     <td rowSpan={2} className={cell}>
-                      <ReceivedDateInput row={r} />
+                      {!r.blank && <ReceivedDateInput row={r} />}
                     </td>
                     <td rowSpan={2} className={`${cell} text-sm font-bold print:text-xs`}>{r.qty}</td>
                     {Array.from({ length: USE_SLOTS }, (_, i) => (

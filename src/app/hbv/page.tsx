@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { db } from '@/lib/db';
 import { getCurrentStaff } from '@/lib/auth';
-import { previousYearMonth } from '@/lib/inventory';
+import { previousYearMonth, nextYearMonth } from '@/lib/inventory';
 import NavBar from '../NavBar';
 import PeriodFilter from '../PeriodFilter';
 import HbvSheet, { type HbvGroup, type HbvRow } from './HbvSheet';
@@ -53,11 +53,14 @@ export default async function HbvPage({ searchParams }: { searchParams: Promise<
   }
   const yearMonth = `${year}-${String(month).padStart(2, '0')}`;
 
-  const [records, lots, receivedDates] = await Promise.all([
+  const [records, lots, receivedDates, nextOrders] = await Promise.all([
     db.monthlyRecord.findMany({ where: { yearMonth, itemId: { in: itemIds } } }),
     db.lot.findMany({ where: { yearMonth } }),
     db.lotReceivedDate.findMany({ where: { itemId: { in: itemIds } } }),
+    db.purchaseOrder.findMany({ where: { targetYearMonth: nextYearMonth(yearMonth), itemId: { in: itemIds } } }),
   ]);
+  // Items with a 다음달 발주 on the dashboard get an extra blank row to hand-write the incoming LOT.
+  const orderedItemIds = new Set(nextOrders.filter((o) => o.orderedQty > 0).map((o) => o.itemId));
   const recordByItem = new Map(records.map((r) => [r.itemId, r]));
   const relevantLots = lots.filter((l) => itemIds.includes(l.itemId));
   const lotCounts = await db.lotCount.findMany({ where: { lotId: { in: relevantLots.map((l) => l.id) }, yearMonth } });
@@ -69,7 +72,7 @@ export default async function HbvPage({ searchParams }: { searchParams: Promise<
     g.codes.forEach((code, idx) => {
       const item = itemByCode.get(code);
       if (!item) return;
-      const base = { no: idx + 1, itemId: item.id, code: item.code, name: item.name };
+      const base = { no: idx + 1, itemId: item.id, code: item.code, name: item.name, blank: false };
       const itemRows: HbvRow[] = [];
       const itemLots = relevantLots.filter((l) => l.itemId === item.id);
       if (itemLots.length > 0) {
@@ -95,6 +98,9 @@ export default async function HbvPage({ searchParams }: { searchParams: Promise<
             receivedDate: receivedDateByKey.get(`${item.id}:`) ?? '',
           });
         }
+      }
+      if (orderedItemIds.has(item.id)) {
+        itemRows.push({ ...base, lotNumber: '', qty: null, receivedDate: '', blank: true });
       }
       // Keep every item on the sheet even when nothing unopened is left.
       if (itemRows.length === 0) {
