@@ -416,7 +416,6 @@ export default function InventoryTable({
                           value={actualDrafts[row.itemId] ?? ''}
                           onChange={(e) => setActualDrafts((d) => ({ ...d, [row.itemId]: e.target.value }))}
                           onWheel={(e) => e.currentTarget.blur()}
-                          placeholder="실사 입력"
                           className="w-20 [appearance:textfield] rounded border border-sky-300 bg-sky-50 px-2 py-1 text-base font-bold text-sky-900 focus:border-sky-500 focus:bg-white focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none print:hidden"
                         />
                         <span className="hidden print:inline-block print:h-7 print:w-24 print:border print:border-black" />
@@ -463,7 +462,6 @@ export default function InventoryTable({
                             value={orderDraft}
                             onChange={(e) => setOrderDrafts((d) => ({ ...d, [row.itemId]: e.target.value }))}
                             onWheel={(e) => e.currentTarget.blur()}
-                            placeholder="발주 입력"
                             className={`w-20 [appearance:textfield] rounded border px-2 py-1 text-base font-bold [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none ${
                               orderWarning
                                 ? 'border-red-400 bg-red-50 text-red-900 focus:border-red-500 focus:outline-none'
